@@ -1,0 +1,177 @@
+Terraform Code
+
+maint.tf
+
+# fetch nutanix provider
+terraform {
+  required_providers {
+     nutanix = {
+      source = "nutanix.com/nutanix/nutanix"
+      version = "1.2.0"
+    }
+  }
+}
+
+# provider authentication
+provider "nutanix" {
+    username = var.prism_user
+    password = var.prism_password
+    endpoint = var.prism_server
+    port     = var.prism_port
+    insecure = false
+}
+
+# region datasources
+data "nutanix_clusters" "clusters" {}
+locals {
+     cluster_uuid = [
+        for cluster in data.nutanix_clusters.clusters.entities :
+        cluster.metadata.uuid if cluster.service_list[0] != "PRISM_CENTRAL"
+        ][0]
+}
+data "nutanix_subnet" "network" {
+    subnet_name = var.nutanix_network
+}
+data "nutanix_image" "image" {
+    image_name = var.nutanix_image
+}
+data "template_file" "cloud" {
+    count = var.vm_count
+    template = file("cloud-init")
+    vars = {
+        vm_user = var.vm_user
+        vm_name = "${var.vm_name}-${count.index + 1}"
+	vm_domain = var.vm_domain
+        vm_public_key = var.vm_public_key
+	vm_password = var.vm_password
+    }
+}
+
+resource "nutanix_virtual_machine" "vm" {
+    count                = var.vm_count
+    name                 = "${var.vm_name}-${count.index + 1}"
+    num_vcpus_per_socket = var.vm_num_vcpus_per_socket
+    num_sockets          = var.vm_cpu
+    memory_size_mib      = var.vm_ram
+    cluster_uuid         = local.cluster_uuid
+
+    guest_customization_cloud_init_user_data = base64encode("${element(data.template_file.cloud.*.rendered,count.index)}")
+
+    nic_list {
+        subnet_uuid = data.nutanix_subnet.network.id
+    }
+
+    disk_list {
+        data_source_reference = {
+            kind = var.nutanix_image_source_reference 
+            uuid = data.nutanix_image.image.id
+        }
+    }
+
+    disk_list {
+        device_properties {
+            disk_address = {
+                device_index = var.vm_disk_devide_index
+                adapter_type = var.vm_disk_adapter_type 
+            }
+            device_type = var.vm_disk_type
+        }
+        disk_size_mib   = (var.vm_disk_size_gb * 1024)
+    }
+}
+
+# endregion
+terraform.tfvars
+
+# provider
+prism_user = "<change_me>"
+prism_password = "<change_me>"
+prism_server = "<change_me>"
+prism_port = "9440"
+
+# nutanix image and infra
+nutanix_image = "CentOS7-NUG-TF"
+nutanix_image_source_reference = "image"
+nutanix_network = "<change_me>"
+#endregion
+
+# region nutanix vm config
+vm_count = 1 
+vm_name = "nug-swiss-tf"
+vm_domain = "<change_me>"
+vm_num_vcpus_per_socket = 1
+vm_cpu = 1
+vm_ram = 1024
+vm_disk_type = "DISK"
+vm_disk_devide_index = 1
+vm_disk_adapter_type = "SCSI"
+vm_disk_size_gb = 20
+#endregion
+
+# nutanix vm customization
+vm_user = "centos"
+vm_password = "nugdemo2021"
+vm_public_key = "<change_me>"
+#endregion
+
+# nutanix security security policy
+security_rule_name = "nug-swiss-tf-rule" # name of the security policy
+security_rule_description = "Deny all outbound traffic." # description of the security policy
+security_rule_action = "MONITOR" # apply security policy
+security_apptype_value = "nug_demo" # apply rule to this app type
+#endregion
+variables.tf
+
+# region authentication
+variable "prism_user" {}
+variable "prism_password" {}
+variable "prism_server" {}
+variable "prism_port" {}
+# endregion
+
+# region cluster information
+variable "nutanix_image" {}
+variable "nutanix_network" {}
+variable "nutanix_image_source_reference" {}
+# endregion
+
+# region vm config
+variable "vm_count" {}
+variable "vm_name" {}
+variable "vm_num_vcpus_per_socket" {}
+variable "vm_cpu" {}
+variable "vm_ram" {}
+variable "vm_disk_type" {}
+variable "vm_disk_devide_index" {}
+variable "vm_disk_adapter_type" {}
+variable "vm_disk_size_gb" {}
+# endregion
+
+# region vm customization
+variable "vm_user" {}
+variable "vm_public_key" {}
+variable "vm_password" {}
+variable "vm_domain" {}
+# endregion
+
+# region nutanix_security_isolation
+variable "security_rule_name" {}
+variable "security_rule_description" {}
+variable "security_rule_action" {}
+variable "security_apptype_value" {}
+# endregion
+cloud-init
+
+#cloud-config
+ssh_pwauth: True
+
+# set password and ssh key for default user
+password: ${vm_password}
+ssh_authorized_keys:
+ - ${vm_public_key}
+
+chpasswd:
+  expire: False # disable password change (for default and additional users)
+
+hostname: ${vm_name}
+fqdn: ${vm_name}.${vm_domain}
